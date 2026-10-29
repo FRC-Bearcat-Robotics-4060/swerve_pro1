@@ -4,112 +4,112 @@
 
 package frc.robot;
 
-import edu.wpi.first.math.geometry.Rotation3d;
-import edu.wpi.first.wpilibj.DriverStation;
-import edu.wpi.first.wpilibj.Filesystem;
+import static edu.wpi.first.units.Units.Meters;
+import static edu.wpi.first.units.Units.MilliOhms;
+import static edu.wpi.first.units.Units.Volts;
+
+import com.pathplanner.lib.auto.AutoBuilder;
+import edu.wpi.first.math.geometry.Pose2d;
+import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.interpolation.InterpolatingDoubleTreeMap;
+import edu.wpi.first.wpilibj.smartdashboard.SendableChooser;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
-import edu.wpi.first.wpilibj2.command.button.RobotModeTriggers;
-import frc.robot.Constants.OperatorConstants;
-import frc.robot.subsystems.swervedrive.SwerveSubsystem;
-import java.io.File;
-import swervelib.SwerveInputStream;
+import edu.wpi.first.wpilibj2.command.button.Trigger;
+import frc.robot.subsystems.swervedrive.SwerveDriveSubsystem;
+import frc.robot.subsystems.vision.LimelightVisionSubsystem;
+import yams.mechanisms.swerve.utility.SwerveInputStream;
+import yams.motorcontrollers.simulation.BatterySim;
 
 /**
- * Drive controls carried over from the 2025 REEFSCAPE robot (pathplanner branch). The coral and climber
- * mechanisms and the PathPlanner autos are left out; this is the swerve chassis only.
+ * This class is where the bulk of the robot should be declared. Since Command-based is a "declarative" paradigm, very
+ * little robot logic should actually be handled in the {@link Robot} periodic methods (other than the scheduler calls).
+ * Instead, the structure of the robot (including subsystems, commands, and trigger mappings) should be declared here.
  */
 public class RobotContainer
 {
 
-  final CommandXboxController driverXbox = new CommandXboxController(0);
+  // Replace with CommandPS4Controller or CommandJoystick if needed
+  final         CommandXboxController driverXbox = new CommandXboxController(0);
+  // The robot's subsystems and commands are defined here...
+  // Establish a Sendable Chooser that will be able to be sent to the SmartDashboard, allowing selection of desired auto
+  // Built from PathPlanner's AutoBuilder once the swerve subsystem has configured it, so autos discovered in
+  // deploy/pathplanner/autos (e.g. "New Auto") show up automatically.
+  private final SendableChooser<Command> autoChooser;
 
-  // Same config folder as 2025: src/main/deploy/swerve/neo
-  private final SwerveSubsystem drivebase = new SwerveSubsystem(new File(Filesystem.getDeployDirectory(),
-                                                                         "swerve/neo"));
+  private final SwerveDriveSubsystem     swerve          = new SwerveDriveSubsystem();
+  private final LimelightVisionSubsystem limelightVision = new LimelightVisionSubsystem(swerve);
+//  private final PhotonVisionSubsystem    photonVision    = new PhotonVisionSubsystem(swerve);
 
-  private boolean slowDrive = false;
+  // Toggled by a button press to switch the drive stream between angular velocity (right stick X rotates) and
+  // heading (right stick X/Y picks the desired heading angle) control.
+  private       boolean headingControlEnabled = false;
 
-  /**
-   * Field-relative drive controlled by angular velocity. Axis signs are the ones the 2025 robot used.
-   */
-  SwerveInputStream driveAngularVelocity = SwerveInputStream.of(drivebase.getSwerveDrive(),
-                                                                () -> driverXbox.getLeftY() * +1,
-                                                                () -> driverXbox.getLeftX() * +1)
-                                                            .withControllerRotationAxis(() -> driverXbox.getRightX() * -1)
-                                                            .deadband(OperatorConstants.DEADBAND)
-                                                            .scaleTranslation(OperatorConstants.SCALE_CONSTANT)
-                                                            .allianceRelativeControl(true);
-
-  /**
-   * Slow version (2025 "climb mode"), toggled with the Start button.
-   */
-  SwerveInputStream driveAngularVelocitySlow = SwerveInputStream.of(drivebase.getSwerveDrive(),
-                                                                    () -> driverXbox.getLeftY() * +1,
-                                                                    () -> driverXbox.getLeftX() * +1)
-                                                                .withControllerRotationAxis(() -> driverXbox.getRightX() * -0.5)
-                                                                .deadband(OperatorConstants.DEADBAND)
-                                                                .scaleTranslation(OperatorConstants.SCALE_CONSTANT_SLOW)
-                                                                .allianceRelativeControl(true);
-
+  private final SwerveInputStream driveStream = swerve.getAngularVelocityStream(driverXbox::getLeftY,
+                                                                                 driverXbox::getLeftX,
+                                                                                 ()->driverXbox.getRawAxis(2))
+                                                       .withControllerHeadingAxis(driverXbox::getRightX,
+                                                                                  driverXbox::getRightY)
+                                                       .withHeadingControl(() -> headingControlEnabled)
+                                                       .withDeadband(0.05)
+                                                       .withAllianceRelativeControl();
   public RobotContainer()
   {
+    configureBatterySim();
+
+    autoChooser = AutoBuilder.buildAutoChooser();
+    SmartDashboard.putData("Auto Chooser", autoChooser);
+
     configureBindings();
-    DriverStation.silenceJoystickConnectionWarning(true);
-  }
-
-  private void setDefaultDriveCommand()
-  {
-    if (slowDrive)
-    {
-      drivebase.setDefaultCommand(drivebase.driveFieldOriented(driveAngularVelocitySlow));
-    } else
-    {
-      drivebase.setDefaultCommand(drivebase.driveFieldOriented(driveAngularVelocity));
-    }
-    SmartDashboard.putBoolean("SlowDrive", slowDrive);
-  }
-
-  private void configureBindings()
-  {
-    setDefaultDriveCommand();
-
-    // Start: toggle slow drive
-    driverXbox.start().onTrue(Commands.runOnce(() -> {
-      slowDrive = !slowDrive;
-      setDefaultDriveCommand();
-    }, drivebase));
-
-    // Y: zero the gyro (robot front is now "away from the driver")
-    driverXbox.y().onTrue(Commands.runOnce(drivebase::zeroGyro));
-
-    // Test mode only, for the on-blocks checks:
-    //   Back (hold) = point all four wheels straight ahead
-    //   X (hold)    = lock wheels in an X
-    // 2025 bound these inside "if (DriverStation.isTest())", which runs only once at startup
-    // while the robot is disabled, so they never worked. Mode triggers fix that.
-    RobotModeTriggers.test().and(driverXbox.back()).whileTrue(drivebase.centerModulesCommand());
-    RobotModeTriggers.test().and(driverXbox.x())
-                     .whileTrue(Commands.runOnce(drivebase::lock, drivebase).repeatedly());
   }
 
   /**
-   * No autonomous yet. PathPlanner autos come back after manual driving works (plan step 9).
+   * Configure the simulated battery's state-of-charge curve and discharge behavior.
+   */
+  private void configureBatterySim()
+  {
+    InterpolatingDoubleTreeMap wornBatteryCurve = new InterpolatingDoubleTreeMap();
+    wornBatteryCurve.put(0.00, 6.0);
+    wornBatteryCurve.put(0.05, 6.5);
+    wornBatteryCurve.put(0.10, 9.5);
+    wornBatteryCurve.put(0.20, 10.2);
+    wornBatteryCurve.put(0.40, 10.6);
+    wornBatteryCurve.put(0.60, 10.9);
+    wornBatteryCurve.put(0.80, 11.2);
+    wornBatteryCurve.put(0.90, 11.4);
+    wornBatteryCurve.put(1.00, 11.6);
+    BatterySim.replaceSOCInterpolation(wornBatteryCurve);
+    BatterySim.enableDischarge(18, Volts.of(11), MilliOhms.of(20));
+  }
+
+  /**
+   * Use this method to define your trigger->command mappings. Triggers can be created via the
+   * {@link Trigger#Trigger(java.util.function.BooleanSupplier)} constructor with an arbitrary predicate, or via the
+   * named factories in {@link edu.wpi.first.wpilibj2.command.button.CommandGenericHID}'s subclasses for
+   * {@link CommandXboxController Xbox}/{@link edu.wpi.first.wpilibj2.command.button.CommandPS4Controller PS4}
+   * controllers or {@link edu.wpi.first.wpilibj2.command.button.CommandJoystick Flight joysticks}.
+   */
+  private void configureBindings()
+  {
+    swerve.setDefaultCommand(swerve.drive(driveStream));
+    driverXbox.button(1).whileTrue(swerve.sysIdModule("frontleft"));
+    driverXbox.x().whileTrue(swerve.driveToPointPathPlanner(new Pose2d(Meters.of(3), Meters.of(3), Rotation2d.fromDegrees(180))));
+    driverXbox.y().whileTrue(swerve.driveToPointYAMS(new Pose2d(Meters.of(3), Meters.of(3), Rotation2d.fromDegrees(180))));
+    driverXbox.start().and(driverXbox.back()).onTrue(swerve.zeroGyro());
+    driverXbox.a().toggleOnTrue(Commands.startEnd(() -> headingControlEnabled = true, () -> headingControlEnabled = false));
+  }
+
+  /**
+   * Use this to pass the autonomous command to the main {@link Robot} class.
+   *
+   * @return the command to run in autonomous
    */
   public Command getAutonomousCommand()
   {
-    return Commands.none();
+    // Pass in the selected auto from the SmartDashboard as our desired autnomous commmand
+    return autoChooser.getSelected();
   }
 
-  public void setMotorBrake(boolean brake)
-  {
-    drivebase.setMotorBrake(brake);
-  }
-
-  public void resetGyro_inverted()
-  {
-    drivebase.getSwerveDrive().setGyro(new Rotation3d(0, 0, Math.PI));
-  }
 }
